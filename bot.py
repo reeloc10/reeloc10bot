@@ -27,6 +27,22 @@ DEVICE_URL = "https://id.twitch.tv/oauth2/device"
 TWITCH_WS_URL = "wss://eventsub.wss.twitch.tv/ws"
 
 
+def load_config() -> dict:
+    """Read configuration path from environment and parse JSON config directly."""
+    config_path = os.environ.get("BOT_CONFIG", "config.json")
+
+    if not os.path.exists(config_path):
+        print(f"{RED}[!] Configuration file not found at: {config_path}{RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"{RED}[!] Failed to parse JSON config {config_path}: {e}{RESET}", file=sys.stderr)
+        sys.exit(1)
+
+
 def request_app_token(client_id: str, client_secret: str) -> dict:
     """Request an App Access Token from Twitch using client credentials POST."""
     print(f"{CYAN}[*]{RESET} Requesting App Access Token for Client ID: {BOLD}{client_id[:6]}...{RESET}")
@@ -84,8 +100,13 @@ async def run_eventsub_listener(access_token: str, client_id: str):
 
 
 def main():
-    client_id = os.environ.get("TWITCH_CLIENT_ID", "placeholder_client_id")
-    client_secret = os.environ.get("TWITCH_CLIENT_SECRET", "placeholder_client_secret")
+    config = load_config()
+    client_id = config.get("twitch_client_id")
+    client_secret = config.get("twitch_client_secret")
+
+    if not client_id or not client_secret:
+        print(f"{RED}[!] Missing 'twitch_client_id' or 'twitch_client_secret' in configuration file.{RESET}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"{CYAN}[*]{RESET} Initializing {BOLD}reeloc10bot{RESET}...")
     token_data = request_app_token(client_id, client_secret)

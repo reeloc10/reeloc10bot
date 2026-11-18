@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 reeloc10
+
+# nvim -n -u NONE <secret>/config.json
+
+env PYTHONPATH=../urllib-inspector python3 bot.py
+env PYTHONPATH=../urllib-inspector BOT_CONFIG=config.example.json python3 bot.py
