@@ -10,7 +10,7 @@ A lightweight, minimal dependency Twitch bot module built in standard library Py
 
 ## Usage
 
-Set up your credentials and execute the bot by scoping `PYTHONPATH` via `env`:
+Execute the bot by scoping `PYTHONPATH` via `env`:
 
 ```bash
 env PYTHONPATH="/path/to/urllib-inspector" python3 bot.py
