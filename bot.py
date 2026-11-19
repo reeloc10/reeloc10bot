@@ -392,7 +392,7 @@ async def run_eventsub_session(
 
                     if chatter not in session.session_visitors:
                         session.session_visitors.add(chatter)
-                        welcome_msg = f"Welcome to the chat, @{chatter}!"
+                        welcome_msg = f"Hi @{chatter}!"
                         await asyncio.to_thread(
                             send_chat_message,
                             client_id,
