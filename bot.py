@@ -2,6 +2,7 @@
 # Copyright 2026 reeloc10
 
 import asyncio
+import dataclasses
 import functools
 import json
 import os
@@ -10,7 +11,7 @@ import sys
 import urllib.error
 
 import urllib_inspector
-
+import token_pipeline
 import bot_responses
 
 # ANSI Color Constants
@@ -27,21 +28,38 @@ try:
 except ModuleNotFoundError:
     print(f"\n{YELLOW}[*]{RESET} Missing websockets dependency. EventSub listener will be unavailable.")
 
-TOKEN_URL = "https://id.twitch.tv/oauth2/token"
-DEVICE_URL = "https://id.twitch.tv/oauth2/device"
-VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
-USERS_URL = "https://api.twitch.tv/helix/users"
 SUBS_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
 CHAT_SEND_URL = "https://api.twitch.tv/helix/chat/messages"
 TWITCH_WS_URL = "wss://eventsub.wss.twitch.tv/ws"
 
-# WebSocket Keepalive Tuning (websockets library defaults: ping_interval=20, ping_timeout=20)
+# WebSocket Keepalive Tuning
 WS_PING_INTERVAL = 30
 WS_PING_TIMEOUT = 30
 
 
+class StreamSession:
+    def __init__(self):
+        self.reset_session()
+
+    def reset_session(self):
+        self.is_live = False
+        self.session_visitors = set()          # Unique users who messaged or redeemed this stream
+        self.daily_redeems_count = 0          # Total check-ins for current stream
+        self.followers_this_stream = 0        # New followers since stream started
+
+
+session = StreamSession()
+
+
+def abbreviate_token(token: str) -> str:
+    """Safely abbreviate a token for debug output."""
+    if not token:
+        return "EMPTY"
+    return f"{token[:3]}... (Length: {len(token)})" if len(token) > 3 else "EMPTY"
+
+
 def early_sigint_handler(sig, frame):
-    """Simple handler for early initialization phase (no chat message possible yet)."""
+    """Simple handler for early initialization phase."""
     print(f"\n{YELLOW}[*]{RESET} Aborted during initialization. Exiting...")
     sys.exit(0)
 
@@ -50,7 +68,6 @@ def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
     """Intercept Ctrl+C, send shutdown message to chat, and exit cleanly."""
     print(f"\n{YELLOW}[*]{RESET} Shutting down reeloc10bot...")
 
-    # Send final shutdown message to Twitch chat
     try:
         send_chat_message(
             client_id=client_id,
@@ -68,7 +85,7 @@ def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
 
 
 def load_config() -> dict:
-    """Read configuration path from environment and parse JSON config directly."""
+    """Read configuration path from environment and parse JSON config into raw dict."""
     config_path = os.environ.get("BOT_CONFIG", "config.json")
 
     if not os.path.exists(config_path):
@@ -83,109 +100,117 @@ def load_config() -> dict:
         sys.exit(1)
 
 
-def validate_user_token(token: str) -> dict:
-    """Validate user access token using Twitch /oauth2/validate endpoint via urllib_inspector."""
-    headers = [
-        f"Authorization: OAuth {token}"
-    ]
-
-    res = urllib_inspector.inspect_url(
-        VALIDATE_URL,
-        custom_headers=headers
-    )
-
-    body = res.get("body")
-    if isinstance(body, bytes):
-        body = body.decode("utf-8")
-
-    if res["success"] and res["status_code"] == 200:
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError:
-            return {}
-    else:
-        print(f"{RED}[!] Token validation failed ({res['status_code']}): {body}{RESET}", file=sys.stderr)
-        return {}
-
-
-def request_app_token(client_id: str, client_secret: str) -> dict:
-    """Request an App Access Token from Twitch using client credentials POST."""
-    print(f"{CYAN}[*]{RESET} Requesting App Access Token for Client ID: {BOLD}{client_id[:6]}...{RESET}")
-
-    res = urllib_inspector.inspect_url(
-        TOKEN_URL,
-        follow_redirects=False,
-        data_items=[
-            f"client_id={client_id}",
-            f"client_secret={client_secret}",
-            "grant_type=client_credentials"
-        ]
-    )
-
-    if res["success"] and res["status_code"] == 200:
-        return json.loads(res["body"])
-    else:
-        print(f"{RED}[!] Token request failed ({res['status_code']}): {res['body']}{RESET}", file=sys.stderr)
-        return {}
-
-
-def get_user_id(client_id: str, token: str, login: str) -> str:
-    """Fetch Twitch User ID for a given login name using urllib_inspector."""
-    url = f"{USERS_URL}?login={login}"
+def subscribe_eventsub_topics(client_id: str, sub_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False) -> int:
+    """
+    Subscribe to EventSub topics appropriate for the given session identity.
+    Uses app_token for bot chat subscriptions and broadcaster token for broadcaster topics.
+    """
     headers = {
         "Client-ID": client_id,
-        "Authorization": f"Bearer {token}"
-    }
-
-    res = urllib_inspector.inspect_url(
-        url,
-        custom_headers=headers
-    )
-    body = res.get("body")
-    if isinstance(body, bytes):
-        body = body.decode("utf-8")
-
-    if res["success"] and res["status_code"] == 200:
-        data = json.loads(res["body"]).get("data", [])
-        if data:
-            return data[0]["id"]
-    print(f"{RED}[!] Failed to resolve user ID for {login} ({res['status_code']}): {res['body']}{RESET}", file=sys.stderr)
-    return ""
-
-
-def subscribe_chat_message(client_id: str, token: str, session_id: str, broadcaster_id: str, bot_id: str) -> bool:
-    """Subscribe to chat messages using EventSub WebSocket session. Returns True on success."""
-    headers = {
-        "Client-ID": client_id,
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {sub_token}",
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "type": "channel.chat.message",
-        "version": "1",
-        "condition": {
-            "broadcaster_user_id": broadcaster_id,
-            "user_id": bot_id
-        },
-        "transport": {
-            "method": "websocket",
-            "session_id": session_id
-        }
-    }
-
-    res = urllib_inspector.inspect_url(
-        SUBS_URL,
-        custom_headers=headers,
-        raw_json=json.dumps(payload)
-    )
-
-    if res["success"] and res["status_code"] in (200, 202):
-        print(f"{GREEN}[+]{RESET} Subscribed to {BOLD}channel.chat.message{RESET}!")
-        return True
+    if is_broadcaster_token:
+        subscriptions = [
+            {
+                "type": "stream.online",
+                "version": "1",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id
+                },
+                "optional": False
+            },
+            {
+                "type": "channel.channel_points_custom_reward_redemption.add",
+                "version": "1",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id
+                },
+                "optional": True
+            }
+        ]
     else:
-        print(f"{RED}[!] EventSub subscription failed ({res['status_code']}): {res['body']}{RESET}", file=sys.stderr)
-        return False
+        subscriptions = [
+            {
+                "type": "channel.chat.message",
+                "version": "1",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id,
+                    "user_id": bot_id
+                },
+                "optional": False
+            },
+            {
+                "type": "channel.follow",
+                "version": "2",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id,
+                    "moderator_user_id": bot_id
+                },
+                "optional": True
+            },
+            {
+                "type": "stream.online",
+                "version": "1",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id
+                },
+                "optional": True
+            },
+            {
+                "type": "stream.offline",
+                "version": "1",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id
+                },
+                "optional": True
+            }
+        ]
+
+    active_subs_count = 0
+    token_tag = "Broadcaster" if is_broadcaster_token else "Bot"
+
+    for sub in subscriptions:
+        payload = {
+            "type": sub["type"],
+            "version": sub["version"],
+            "condition": sub["condition"],
+            "transport": {
+                "method": "websocket",
+                "session_id": session_id
+            }
+        }
+
+        token_repr = abbreviate_token(sub_token)
+        print(f"{GRAY}[DEBUG] [{token_tag}] Subscribing to {sub['type']} using token: {token_repr}{RESET}", file=sys.stderr)
+
+        res = urllib_inspector.inspect_url(
+            SUBS_URL,
+            custom_headers=headers,
+            raw_json=json.dumps(payload)
+        )
+
+        sub_type = sub["type"]
+        is_optional = sub.get("optional", False)
+        status = res.get("status_code")
+        body = res.get("body")
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+
+        print(f"{GRAY}[DEBUG] [{token_tag}] {sub_type} -> Status: {status}, Body: {body}{RESET}", file=sys.stderr)
+
+        if res["success"] and status in (200, 202):
+            print(f"{GREEN}[+]{RESET} [{token_tag}] Subscribed to {BOLD}{sub_type}{RESET}!")
+            active_subs_count += 1
+        elif status in (401, 403) and is_optional:
+            print(f"{YELLOW}[!] [{token_tag}] Optional subscription skipped ({sub_type}) due to missing scope/auth ({status}).{RESET}")
+        else:
+            print(f"{RED}[!] [{token_tag}] Failed subscription for {sub_type} ({status}): {body}{RESET}", file=sys.stderr)
+            if not is_optional:
+                print(f"{RED}[!] Mandatory subscription {sub_type} failed!{RESET}", file=sys.stderr)
+
+    return active_subs_count
 
 
 def send_chat_message(
@@ -196,7 +221,7 @@ def send_chat_message(
     message: str,
     reply_parent_message_id: str | None = None
 ) -> bool:
-    """Send a chat message via Twitch Helix API and verify actual delivery (is_sent)."""
+    """Send a chat message via Twitch Helix API using App or User Access Token."""
     headers = {
         "Client-ID": client_id,
         "Authorization": f"Bearer {token}",
@@ -243,17 +268,22 @@ async def run_eventsub_session(
     client_id: str,
     broadcaster_id: str,
     bot_id: str,
+    is_broadcaster_token: bool = False,
     is_reconnect: bool = False
 ) -> str | None:
-    """Run a single EventSub WebSocket session. Returns a reconnect_url if requested, else None."""
-    print(f"{CYAN}[*]{RESET} Connecting to EventSub WebSocket endpoint...")
+    """Run a single EventSub WebSocket session for either Bot or Broadcaster."""
+    global session
+    label = "Broadcaster" if is_broadcaster_token else "Bot"
+    print(f"{CYAN}[*]{RESET} [{label}] Connecting to EventSub WebSocket endpoint...")
 
     async with websockets.connect(
         ws_url,
         ping_interval=WS_PING_INTERVAL,
         ping_timeout=WS_PING_TIMEOUT
     ) as websocket:
-        print(f"{GREEN}[+]{RESET} Connected to Twitch EventSub WebSocket.")
+        print(f"{GREEN}[+]{RESET} [{label}] Connected to Twitch EventSub WebSocket.")
+
+        greeting_sent = False
 
         async for raw_message in websocket:
             message = json.loads(raw_message)
@@ -263,17 +293,47 @@ async def run_eventsub_session(
             if msg_type == "session_welcome":
                 session_id = message["payload"]["session"]["id"]
                 keepalive = message["payload"]["session"]["keepalive_timeout_seconds"]
-                print(f"{GREEN}[+] Session established:{RESET} {BOLD}{session_id}{RESET} (Keepalive: {keepalive}s)")
+                print(f"{GREEN}[+] [{label}] Session established:{RESET} {BOLD}{session_id}{RESET} (Keepalive: {keepalive}s)")
                 if not is_reconnect:
-                    print(f"[*] Effective token fingerprint: {ws_token[:3]}... (Length: {len(ws_token)})")
-                    await asyncio.to_thread(
-                        subscribe_chat_message,
+                    print(f"[*] [{label}] Token fingerprint: {abbreviate_token(ws_token)}")
+
+                    # Use the bot's own user token for bot session subscriptions
+                    subscription_token = ws_token
+
+                    subs_succeeded = await asyncio.to_thread(
+                        subscribe_eventsub_topics,
                         client_id,
-                        ws_token,
+                        subscription_token,
                         session_id,
                         broadcaster_id,
-                        bot_id
+                        bot_id,
+                        is_broadcaster_token
                     )
+
+                    if subs_succeeded == 0:
+                        print(f"{RED}[!] [{label}] Zero active subscriptions registered. Closing thread cleanly.{RESET}")
+                        return None
+
+                    if is_broadcaster_token and not greeting_sent:
+                        greeting_sent = True
+                        print(f"{GREEN}[->]{RESET} Sending startup greeting to chat...")
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    send_chat_message,
+                                    client_id,
+                                    app_token,
+                                    broadcaster_id,
+                                    bot_id,
+                                    "Hello chat"
+                                ),
+                                timeout=5.0
+                            )
+                            print(f"{GREEN}[+] Startup greeting sent successfully via App Token.{RESET}")
+                        except asyncio.TimeoutError:
+                            print(f"{RED}[!] Startup greeting timed out (API endpoint unresponsive).{RESET}", file=sys.stderr)
+                        except Exception as e:
+                            print(f"{RED}[!] Startup greeting error: {e}{RESET}", file=sys.stderr)
 
             elif msg_type == "session_keepalive":
                 pass
@@ -281,21 +341,73 @@ async def run_eventsub_session(
             elif msg_type == "notification":
                 sub_type = metadata.get("subscription_type")
                 event_data = message["payload"]["event"]
-                if sub_type == "channel.chat.message":
+                print(f"{CYAN}[EVENT:{label}]{RESET} Received {BOLD}{sub_type}{RESET}")
+
+                if sub_type == "stream.online":
+                    session.reset_session()
+                    session.is_live = True
+                    print(f"{GREEN}[*] Stream went LIVE. Session stats reset.{RESET}")
+
+                elif sub_type == "stream.offline":
+                    session.is_live = False
+                    print(f"\n{YELLOW}=== STREAM OFFLINE - SESSION SUMMARY ==={RESET}")
+                    print(f"• Unique Visitors (Chat / Check-in): {len(session.session_visitors)}")
+                    print(f"• 'Daily check' Redemptions: {session.daily_redeems_count}")
+                    print(f"• New Followers This Stream: {session.followers_this_stream}")
+                    print(f"{YELLOW}========================================={RESET}\n")
+                    session.reset_session()
+
+                elif sub_type == "channel.follow":
+                    session.followers_this_stream += 1
+                    username = event_data.get("user_name")
+                    print(f"{GREEN}[+] New follower this stream:{RESET} {BOLD}{username}{RESET}")
+
+                elif sub_type == "channel.channel_points_custom_reward_redemption.add":
+                    reward_title = event_data.get("reward", {}).get("title", "")
+                    if reward_title == "Daily check":
+                        session.daily_redeems_count += 1
+                        username = event_data.get("user_name")
+                        session.session_visitors.add(username)
+
+                        log_msg = f"Daily check redeem: {username} (Total today: {session.daily_redeems_count})"
+                        print(f"{GREEN}[+]{RESET} {log_msg}")
+
+                        await asyncio.to_thread(
+                            send_chat_message,
+                            client_id,
+                            app_token,
+                            broadcaster_id,
+                            bot_id,
+                            log_msg
+                        )
+
+                elif sub_type == "channel.chat.message":
                     chatter_id = event_data.get("chatter_user_id")
                     chatter = event_data.get("chatter_user_name")
                     message_id = event_data.get("message_id")
                     text = event_data.get("message", {}).get("text", "").strip()
                     print(f"{CYAN}[CHAT]{RESET} {BOLD}{chatter}{RESET}: {text}")
 
-                    # Guard against self-replies
                     if chatter_id == bot_id:
                         continue
 
-                    # Evaluate incoming text against standalone bot_responses module
+                    if chatter not in session.session_visitors:
+                        session.session_visitors.add(chatter)
+                        welcome_msg = f"Welcome to the chat, @{chatter}!"
+                        await asyncio.to_thread(
+                            send_chat_message,
+                            client_id,
+                            app_token,
+                            broadcaster_id,
+                            bot_id,
+                            welcome_msg,
+                            message_id
+                        )
+                        print(f"{GREEN}[->]{RESET} Welcomed new session chatter {BOLD}{chatter}{RESET}")
+
                     reply_text = bot_responses.evaluate_message(text, chatter)
                     if reply_text:
-                        print(f"[*] Effective write token fingerprint: {app_token[:3]}... (Length: {len(app_token)})")
+                        print(f"[*] Effective write token fingerprint: {abbreviate_token(app_token)}")
                         sent = await asyncio.to_thread(
                             send_chat_message,
                             client_id,
@@ -307,21 +419,20 @@ async def run_eventsub_session(
                         )
                         if sent:
                             print(f"{GREEN}[->]{RESET} Replied to {BOLD}{chatter}{RESET}: {reply_text}")
-                else:
-                    print(f"{CYAN}[EVENT]{RESET} Received {BOLD}{sub_type}{RESET}: {event_data}")
 
             elif msg_type == "session_reconnect":
                 reconnect_url = message["payload"]["session"]["reconnect_url"]
-                print(f"{YELLOW}[!] Reconnect requested to:{RESET} {reconnect_url}")
+                print(f"{YELLOW}[!] [{label}] Reconnect requested to:{RESET} {reconnect_url}")
                 return reconnect_url
 
     return None
 
 
-async def run_eventsub_listener(ws_token: str, app_token: str, client_id: str, broadcaster_id: str, bot_id: str):
-    """Supervise EventSub WebSocket sessions across reconnects and transient network drops."""
+async def supervise_listener(ws_token: str, app_token: str, client_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False):
+    """Supervise an EventSub WebSocket session across reconnects and network drops."""
     next_url = TWITCH_WS_URL
     is_reconnect = False
+    label = "Broadcaster" if is_broadcaster_token else "Bot"
 
     while True:
         try:
@@ -332,17 +443,17 @@ async def run_eventsub_listener(ws_token: str, app_token: str, client_id: str, b
                 client_id,
                 broadcaster_id,
                 bot_id,
+                is_broadcaster_token=is_broadcaster_token,
                 is_reconnect=is_reconnect
             )
             if reconnect_url:
                 next_url = reconnect_url
                 is_reconnect = True
             else:
-                next_url = TWITCH_WS_URL
-                is_reconnect = False
-                await asyncio.sleep(3)
+                print(f"{YELLOW}[*] [{label}] Thread closed cleanly (no reconnect requested).{RESET}")
+                break
         except websockets.exceptions.ConnectionClosed as e:
-            print(f"{YELLOW}[!] WebSocket closed ({e.code}: {e.reason}). Reconnecting in 3s...{RESET}")
+            print(f"{YELLOW}[!] [{label}] WebSocket closed ({e.code}: {e.reason}). Reconnecting in 3s...{RESET}", file=sys.stderr)
             next_url = TWITCH_WS_URL
             is_reconnect = False
             await asyncio.sleep(3)
@@ -352,22 +463,18 @@ async def run_eventsub_listener(ws_token: str, app_token: str, client_id: str, b
             TimeoutError,
             json.JSONDecodeError,
         ) as e:
-            print(f"{RED}[!] Transient listener error: {e}. Reconnecting in 5s...{RESET}", file=sys.stderr)
+            print(f"{RED}[!] [{label}] Transient listener error: {e}. Reconnecting in 5s...{RESET}", file=sys.stderr)
             next_url = TWITCH_WS_URL
             is_reconnect = False
             await asyncio.sleep(5)
 
 
 def main():
-    # 1. Register early safety handler right at boot
     signal.signal(signal.SIGINT, early_sigint_handler)
 
     config = load_config()
-    client_id = config.get("twitch_client_id")
-    client_secret = config.get("twitch_client_secret")
-    broadcaster_login = config.get("broadcaster_login", "reeloc10")
-    bot_login = config.get("bot_login", "reeloc10bot")
-    user_token = config.get("twitch_user_token")
+    client_id = config.get("twitch_client_id", "")
+    client_secret = config.get("twitch_client_secret", "")
 
     if not client_id or not client_secret:
         print(f"{RED}[!] Missing 'twitch_client_id' or 'twitch_client_secret' in configuration file.{RESET}", file=sys.stderr)
@@ -375,62 +482,55 @@ def main():
 
     print(f"{CYAN}[*]{RESET} Initializing {BOLD}reeloc10bot{RESET}...")
 
-    if not user_token:
-        print(f"{RED}[!] Error: 'twitch_user_token' is missing from your configuration file!{RESET}", file=sys.stderr)
-        print(f"{RED}[!] App Access Tokens cannot be used for user-bound chat event subscriptions.{RESET}", file=sys.stderr)
+    try:
+        app_token_data = token_pipeline.mint_app_token(client_id, client_secret)
+        app_token = app_token_data["access_token"]
+        print(f"{GREEN}[+]{RESET} Obtained App Token (expires in {YELLOW}{app_token_data.get('expires_in')}s{RESET})")
+
+        active_tokens, resolved_ids = token_pipeline.resolve_token_pipeline(config, app_token)
+    except Exception as e:
+        print(f"{RED}[!] Initialization failed: {e}{RESET}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"{GREEN}[+]{RESET} Loaded User Access Token from configuration.")
-    print(f"[*] Token fingerprint: {user_token[:6]}...{user_token[-4:]} (Length: {len(user_token)})")
+    broadcaster_id = resolved_ids["broadcaster"]
+    bot_id = resolved_ids["bot"]
 
-    # Validate the acquired user token against Twitch
-    print(f"{CYAN}[*]{RESET} Validating User Access Token with Twitch...")
-    token_info = validate_user_token(user_token)
+    bot_entry = active_tokens.get("bot")
+    broadcaster_entry = active_tokens.get("broadcaster")
 
-    if token_info:
-        client_id_full = token_info.get('client_id', '')
-        client_id_abbr = f"{client_id_full[:6]}..." if len(client_id_full) > 6 else client_id_full
+    running_sigint_handler = functools.partial(
+        handle_sigint,
+        client_id=client_id,
+        app_token=app_token,
+        broadcaster_id=broadcaster_id,
+        bot_id=bot_id
+    )
+    signal.signal(signal.SIGINT, running_sigint_handler)
 
-        print(f"{GREEN}[+]{RESET} Token validated successfully!")
-        print(f"    - Client ID: {client_id_abbr}")
-        print(f"    - Login: {token_info.get('login')}")
-        print(f"    - User ID: {token_info.get('user_id')}")
-        print(f"    - Scopes: {token_info.get('scopes')}")
-    else:
-        print(f"{RED}[!] Token validation failed or returned empty details. Proceeding with caution...{RESET}")
+    async def main_loop():
+        tasks = []
+        if bot_entry:
+            tasks.append(
+                supervise_listener(bot_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, is_broadcaster_token=False)
+            )
+        if broadcaster_entry:
+            tasks.append(
+                supervise_listener(broadcaster_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, is_broadcaster_token=True)
+            )
+        if not tasks:
+            print(f"{RED}[!] Error: No active token entries configured for listeners!{RESET}", file=sys.stderr)
+            sys.exit(1)
 
-    token_data = request_app_token(client_id, client_secret)
+        await asyncio.gather(*tasks)
 
-    if "access_token" in token_data:
-        app_token = token_data["access_token"]
-        expires = token_data.get('expires_in')
-        print(f"{GREEN}[+]{RESET} Successfully obtained App Token for API lookups! Expires in: {YELLOW}{expires}s{RESET}")
-
-        broadcaster_id = get_user_id(client_id, app_token, broadcaster_login)
-        bot_id = get_user_id(client_id, app_token, bot_login)
-        print(f"{GRAY}[*] IDs -> Broadcaster ({broadcaster_login}): {broadcaster_id} | Bot ({bot_login}): {bot_id}{RESET}")
-
-        # 2. Initialization passed! Swap to full shutdown handler with context bound.
-        running_sigint_handler = functools.partial(
-            handle_sigint,
-            client_id=client_id,
-            app_token=app_token,
-            broadcaster_id=broadcaster_id,
-            bot_id=bot_id
-        )
-        signal.signal(signal.SIGINT, running_sigint_handler)
-
-        ws_token = user_token
-
-        try:
-            asyncio.run(run_eventsub_listener(ws_token, app_token, client_id, broadcaster_id, bot_id))
-        except KeyboardInterrupt:
-            print(f"\n{YELLOW}[*]{RESET} Bot stopped by user.")
-    else:
-        print(f"{YELLOW}[!] Bot initialization completed with mock/error token response. Skipping WebSocket listener.{RESET}", file=sys.stderr)
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}[*]{RESET} Bot stopped by user.")
 
     print(f"\n{YELLOW}[*]{RESET} reeloc10bot shutdown complete.")
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
