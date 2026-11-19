@@ -11,6 +11,7 @@ A lightweight, minimal dependency Twitch bot module built in standard library Py
 ## Acquiring tokens
 
 config.reduced.json : ["twitch_client_id"] only required.
+Running the command from a dedicated terminal to `exit` once complete helps erase the screen buffer.
 
 ```bash
 env PYTHONPATH=../urllib-inspector BOT_TOKEN_CONFIG=<secrets>/config.reduced.json python3 bot_acquire_token_by_device.py channel:read:redemptions
