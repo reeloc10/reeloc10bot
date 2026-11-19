@@ -67,6 +67,11 @@ def handle_repos(chatter: str, args: list[str]) -> str:
     return f"Repositories: {repos_list} (GitHub: reeloc10) | Licensed under Apache-2.0."
 
 
+def handle_python(chatter: str, args: list[str]) -> str:
+    """Highlight the rare zero-pip Python EventSub architecture."""
+    return "Twitch docs may lack Python refs (only Node/Go/C#) - POC of a custom zero-pip stdlib Python EventSub WebSocket bot."
+
+
 def handle_commands(chatter: str, args: list[str]) -> str:
     """Dynamically list all registered commands and point to example architecture."""
     cmds = ", ".join(sorted(COMMAND_REGISTRY.keys()))
@@ -84,6 +89,7 @@ COMMAND_REGISTRY: dict[str, Callable[[str, list[str]], str]] = {
     "!specs": handle_specs,
     "!wisdom": handle_wisdom,
     "!repos": handle_repos,
+    "!python": handle_python,
     "!commands": handle_commands,
 }
 
