@@ -100,14 +100,16 @@ def load_config() -> dict:
         sys.exit(1)
 
 
-def subscribe_eventsub_topics(client_id: str, sub_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False) -> int:
+def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False) -> int:
     """
-    Subscribe to EventSub topics appropriate for the given session identity.
-    Uses app_token for bot chat subscriptions and broadcaster token for broadcaster topics.
+    Subscribe to EventSub topics over WebSocket transport.
+    Straight WebSockets require the User Access Token (ws_token).
     """
+    effective_token = ws_token  # Both bot and broadcaster websocket transports use their respective user tokens
+
     headers = {
         "Client-ID": client_id,
-        "Authorization": f"Bearer {sub_token}",
+        "Authorization": f"Bearer {effective_token}",
         "Content-Type": "application/json"
     }
 
@@ -182,7 +184,7 @@ def subscribe_eventsub_topics(client_id: str, sub_token: str, session_id: str, b
             }
         }
 
-        token_repr = abbreviate_token(sub_token)
+        token_repr = abbreviate_token(effective_token)
         print(f"{GRAY}[DEBUG] [{token_tag}] Subscribing to {sub['type']} using token: {token_repr}{RESET}", file=sys.stderr)
 
         res = urllib_inspector.inspect_url(
@@ -297,12 +299,11 @@ async def run_eventsub_session(
                 if not is_reconnect:
                     print(f"[*] [{label}] Token fingerprint: {abbreviate_token(ws_token)}")
 
-                    subscription_token = ws_token
-
                     subs_succeeded = await asyncio.to_thread(
                         subscribe_eventsub_topics,
                         client_id,
-                        subscription_token,
+                        ws_token,
+                        app_token,
                         session_id,
                         broadcaster_id,
                         bot_id,
