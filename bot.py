@@ -417,7 +417,8 @@ def main():
     else:
         print(f"{YELLOW}[!] Bot initialization completed with mock/error token response. Skipping WebSocket listener.{RESET}", file=sys.stderr)
 
-    early_sigint_handler(signal.SIGINT, None)
+    print(f"\n{YELLOW}[*]{RESET} reeloc10bot shutdown complete.")
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
