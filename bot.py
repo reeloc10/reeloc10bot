@@ -196,7 +196,7 @@ def send_chat_message(
     message: str,
     reply_parent_message_id: str | None = None
 ) -> bool:
-    """Send a chat message via Twitch Helix API using urllib_inspector."""
+    """Send a chat message via Twitch Helix API and verify actual delivery (is_sent)."""
     headers = {
         "Client-ID": client_id,
         "Authorization": f"Bearer {token}",
@@ -217,10 +217,22 @@ def send_chat_message(
         raw_json=json.dumps(payload)
     )
 
+    body = res.get("body")
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+
     if res["success"] and res["status_code"] == 200:
-        return True
+        try:
+            data = json.loads(body)
+            chat_data = data.get("data", [])
+            if chat_data and chat_data[0].get("is_sent") is False:
+                print(f"{RED}[!] Message blocked or dropped by Twitch chat rules: {body}{RESET}", file=sys.stderr)
+                return False
+            return True
+        except json.JSONDecodeError:
+            return True
     else:
-        print(f"{RED}[!] Failed to send chat message ({res['status_code']}): {res['body']}{RESET}", file=sys.stderr)
+        print(f"{RED}[!] Failed to send chat message ({res['status_code']}): {body}{RESET}", file=sys.stderr)
         return False
 
 
