@@ -127,7 +127,7 @@ def subscribe_eventsub_topics(client_id: str, sub_token: str, session_id: str, b
                 "condition": {
                     "broadcaster_user_id": broadcaster_id
                 },
-                "optional": True
+                "optional": False
             }
         ]
     else:
@@ -297,7 +297,6 @@ async def run_eventsub_session(
                 if not is_reconnect:
                     print(f"[*] [{label}] Token fingerprint: {abbreviate_token(ws_token)}")
 
-                    # Use the bot's own user token for bot session subscriptions
                     subscription_token = ws_token
 
                     subs_succeeded = await asyncio.to_thread(

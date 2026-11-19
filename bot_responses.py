@@ -68,14 +68,22 @@ def handle_repos(chatter: str, args: list[str]) -> str:
 
 
 def handle_python(chatter: str, args: list[str]) -> str:
-    """Highlight the rare zero-pip Python EventSub architecture."""
-    return "Twitch docs may lack Python refs (only Node/Go/C#) - POC of a custom zero-pip stdlib Python EventSub WebSocket bot."
+    """Highlight the rare Python EventSub architecture."""
+    return "Twitch docs may lack Python POC (mostly Node/Go/C#) - POC of a custom stdlib Python EventSub WebSocket bot."
+
+
+def handle_shoutout(chatter: str, args: list[str]) -> str:
+    """Provide a friendly shoutout prompt or reminder for chat/mods."""
+    if args:
+        target = args[0]
+        return f"Go check out @{target}, https://www.twitch.tv/{target} (Mods/Broadcaster can use native dashboard shoutout)."
+    return "Usage: !shoutout <username>"
 
 
 def handle_commands(chatter: str, args: list[str]) -> str:
     """Dynamically list all registered commands and point to example architecture."""
     cmds = ", ".join(sorted(COMMAND_REGISTRY.keys()))
-    return f"Commands: {cmds} | Built with zero-pip Python EventSub WebSockets."
+    return f"Commands: {cmds}."
 
 
 def handle_bot_mention(chatter: str, args: list[str]) -> str:
@@ -90,6 +98,7 @@ COMMAND_REGISTRY: dict[str, Callable[[str, list[str]], str]] = {
     "!wisdom": handle_wisdom,
     "!repos": handle_repos,
     "!python": handle_python,
+    "!shoutout": handle_shoutout,
     "!commands": handle_commands,
 }
 
