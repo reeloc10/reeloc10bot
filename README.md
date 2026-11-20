@@ -35,6 +35,11 @@ Execute the bot by scoping `PYTHONPATH` via `env`:
 env PYTHONPATH="/path/to/urllib-inspector" python3 bot.py
 ```
 
+## References
+
+- [Twitch Chatbot Badge and Chat Identity](https://dev.twitch.tv/docs/chat#chatbot-badge-and-chat-identity) — Requirements for displaying the official Chat Bot badge and appearing under the **Chat Bots** section in the channel users list (requires App Access Token authentication with `channel:bot` authorization).
+- [EventSub Chat Reference (`channel.chat.message`)](https://dev.twitch.tv/docs/eventsub/reference/chat#channel-chat-message) — Subscription specification and multi-account authorization requirements (`user:read:chat` and `user:bot` on the bot account, paired with `channel:bot` on the broadcaster account).
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
