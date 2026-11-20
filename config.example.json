@@ -1,4 +1,36 @@
 {
-  "twitch_client_id": "placeholder_client_id",
-  "twitch_client_secret": "placeholder_client_secret"
+  "twitch_client_id": "CLIENT_ID",
+  "twitch_client_secret": "CLIENT_SECRET",
+  "broadcaster_login": "reeloc10",
+  "bot_login": "reeloc10bot",
+  "tokens": [
+    {
+      "name": "Broadcaster channel:bot Token (reeloc10)",
+      "enabled": true,
+      "flow": "user",
+      "role": "broadcaster",
+      "target": "broadcaster",
+      "access_token": "",
+      "refresh_token": "TOKEN_USER_1",
+      "expected_scopes": ["channel:bot"]
+    },
+    {
+      "flow": "user",
+      "role": "bot",
+      "target": "bot",
+      "enabled": true,
+      "disabled": false,
+      "refresh_token": "TOKEN_BOT_1",
+      "scopes": ["user:read:chat", "user:bot"]
+    },
+    {
+      "flow": "user",
+      "role": "broadcaster",
+      "target": "broadcaster",
+      "enabled": true,
+      "disabled": false,
+      "scopes": ["channel:read:redemptions"],
+      "refresh_token": "TOKEN_USER_2"
+    }
+  ]
 }
