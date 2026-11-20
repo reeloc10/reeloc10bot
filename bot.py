@@ -67,9 +67,66 @@ def early_sigint_handler(sig, frame):
     sys.exit(0)
 
 
+def prune_existing_subscriptions(client_id: str, app_token: str):
+    """Purge any leftover EventSub subscriptions on startup to prevent 409 Conflicts."""
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {app_token}"
+    }
+
+    print(f"{GRAY}[DEBUG] [Prune] Inspecting existing EventSub subscriptions...{RESET}", file=sys.stderr)
+    res = urllib_inspector.inspect_url(SUBS_URL, custom_headers=headers)
+
+    if not res["success"] or res.get("status_code") != 200:
+        return
+
+    body = res.get("body")
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+
+    try:
+        data = json.loads(body).get("data", [])
+        for sub in data:
+            sub_id = sub["id"]
+            sub_type = sub["type"]
+            print(f"{YELLOW}[*] [Prune] Removing stale subscription {sub_type} ({sub_id})...{RESET}", file=sys.stderr)
+            urllib_inspector.inspect_url(
+                f"{SUBS_URL}?id={sub_id}",
+                custom_headers=headers,
+                method="DELETE"
+            )
+    except Exception as e:
+        print(f"{RED}[!] Failed to prune existing subscriptions: {e}{RESET}", file=sys.stderr)
+
+
 def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
-    """Intercept Ctrl+C, send shutdown message to chat, and exit cleanly."""
-    print(f"\n{YELLOW}[*]{RESET} Shutting down reeloc10bot...")
+    """Intercept Ctrl+C, clean up EventSub subscriptions, send shutdown message to chat, and exit cleanly."""
+    print(f"\n{YELLOW}[*]{RESET} Shutting down reeloc10bot gracefully...")
+
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {app_token}"
+    }
+
+    # Clean up active EventSub subscriptions on graceful exit
+    res = urllib_inspector.inspect_url(SUBS_URL, custom_headers=headers)
+    if res["success"] and res.get("status_code") == 200:
+        try:
+            body = res.get("body")
+            if isinstance(body, bytes):
+                body = body.decode("utf-8")
+            data = json.loads(body).get("data", [])
+            for sub in data:
+                sub_id = sub["id"]
+                sub_type = sub["type"]
+                print(f"{GRAY}[DEBUG] Deleting subscription {sub_type} ({sub_id})...{RESET}")
+                urllib_inspector.inspect_url(
+                    f"{SUBS_URL}?id={sub_id}",
+                    custom_headers=headers,
+                    method="DELETE"
+                )
+        except Exception as e:
+            print(f"{RED}[!] Error cleaning up subscriptions during shutdown: {e}{RESET}", file=sys.stderr)
 
     try:
         send_chat_message(
@@ -188,7 +245,6 @@ def bind_conduit_shard(client_id: str, token: str, token_type_label: str, condui
     for attempt in range(1, max_retries + 1):
         print(f"{GRAY}[DEBUG] [Bot (Conduit)] Binding shard 0 via PATCH for session {session_id} using {token_type_label} [Fingerprint: {abbreviate_token(token)}]{RESET}", file=sys.stderr)
 
-        # Pass the method parameter explicitly to your inspector
         res = urllib_inspector.inspect_url(
             CONDUIT_SHARDS_URL,
             custom_headers=headers,
@@ -644,6 +700,9 @@ def main():
 
     bot_entry = active_tokens.get("bot")
     broadcaster_entry = active_tokens.get("broadcaster")
+
+    # Prune any stale EventSub subscriptions left over from brutal kills
+    prune_existing_subscriptions(client_id, app_token)
 
     conduit_id = get_or_create_conduit(client_id, app_token)
     if not conduit_id:
