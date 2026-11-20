@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import sys
+import time
 import urllib.error
 
 import urllib_inspector
@@ -29,6 +30,8 @@ except ModuleNotFoundError:
     print(f"\n{YELLOW}[*]{RESET} Missing websockets dependency. EventSub listener will be unavailable.")
 
 SUBS_URL = "https://api.twitch.tv/helix/eventsub/subscriptions"
+CONDUITS_URL = "https://api.twitch.tv/helix/eventsub/conduits"
+CONDUIT_SHARDS_URL = "https://api.twitch.tv/helix/eventsub/conduits/shards"
 CHAT_SEND_URL = "https://api.twitch.tv/helix/chat/messages"
 TWITCH_WS_URL = "wss://eventsub.wss.twitch.tv/ws"
 
@@ -72,6 +75,7 @@ def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
         send_chat_message(
             client_id=client_id,
             token=app_token,
+            token_type_label="App Access Token [client_credentials]",
             broadcaster_id=broadcaster_id,
             bot_id=bot_id,
             message="Shutting down. Farewell!"
@@ -100,12 +104,134 @@ def load_config() -> dict:
         sys.exit(1)
 
 
-def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False) -> int:
+def get_or_create_conduit(client_id: str, app_token: str) -> str | None:
+    """Check for existing conduits or provision a fresh Twitch Conduit using the App Access Token."""
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {app_token}",
+        "Content-Type": "application/json"
+    }
+
+    print(f"{GRAY}[DEBUG] [Conduit] Inspecting existing conduits using App Access Token [Fingerprint: {abbreviate_token(app_token)}]{RESET}", file=sys.stderr)
+
+    res = urllib_inspector.inspect_url(CONDUITS_URL, custom_headers=headers)
+    status = res.get("status_code")
+    body = res.get("body")
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+
+    print(f"{GRAY}[DEBUG] [Conduit] GET /conduits -> Status: {status}, Body: {body}{RESET}", file=sys.stderr)
+
+    if res["success"] and status == 200:
+        try:
+            data = json.loads(body).get("data", [])
+            if data:
+                conduit_id = data[0]["id"]
+                print(f"{GREEN}[+] Found existing active Twitch Conduit ID:{RESET} {BOLD}{conduit_id}{RESET}")
+                return conduit_id
+        except Exception:
+            pass
+
+    payload = {"shard_count": 1}
+    print(f"{GRAY}[DEBUG] [Conduit] Provisioning new conduit with shard_count=1...{RESET}", file=sys.stderr)
+
+    res = urllib_inspector.inspect_url(
+        CONDUITS_URL,
+        custom_headers=headers,
+        raw_json=json.dumps(payload)
+    )
+    status = res.get("status_code")
+    body = res.get("body")
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+
+    print(f"{GRAY}[DEBUG] [Conduit] POST /conduits -> Status: {status}, Body: {body}{RESET}", file=sys.stderr)
+
+    if res["success"] and status in (200, 201):
+        try:
+            data = json.loads(body).get("data", [])
+            if data:
+                conduit_id = data[0]["id"]
+                print(f"{GREEN}[+] Successfully provisioned Twitch Conduit ID:{RESET} {BOLD}{conduit_id}{RESET}")
+                return conduit_id
+        except Exception:
+            pass
+
+    print(f"{RED}[!] Failed to provision or retrieve Twitch Conduit ({status}): {body}{RESET}", file=sys.stderr)
+    return None
+
+
+def bind_conduit_shard(client_id: str, token: str, token_type_label: str, conduit_id: str, session_id: str, max_retries: int = 5) -> tuple[bool, str | None]:
     """
-    Subscribe to EventSub topics over WebSocket transport.
-    Straight WebSockets require the User Access Token (ws_token).
+    Bind WebSocket session to conduit shard 0 using PATCH /helix/eventsub/conduits/shards
+    via urllib_inspector with method support and exponential backoff retry logic.
     """
-    effective_token = ws_token  # Both bot and broadcaster websocket transports use their respective user tokens
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "conduit_id": conduit_id,
+        "shards": [
+            {
+                "id": 0,
+                "transport": {
+                    "method": "websocket",
+                    "session_id": session_id
+                }
+            }
+        ]
+    }
+
+    for attempt in range(1, max_retries + 1):
+        print(f"{GRAY}[DEBUG] [Bot (Conduit)] Binding shard 0 via PATCH for session {session_id} using {token_type_label} [Fingerprint: {abbreviate_token(token)}]{RESET}", file=sys.stderr)
+
+        # Pass the method parameter explicitly to your inspector
+        res = urllib_inspector.inspect_url(
+            CONDUIT_SHARDS_URL,
+            custom_headers=headers,
+            raw_json=json.dumps(payload),
+            method="PATCH"
+        )
+        status = res.get("status_code")
+        body = res.get("body")
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+
+        if res["success"] and status in (200, 202):
+            print(f"{GREEN}[+] Successfully bound WebSocket session to conduit shard 0 using {token_type_label} (attempt {attempt}).{RESET}")
+            return True, conduit_id
+        elif status == 404 and attempt < max_retries:
+            wait_time = attempt * 1.5
+            print(f"{YELLOW}[!] Conduit/Session propagation pending (404) with {token_type_label}. Retrying shard bind in {wait_time}s (attempt {attempt}/{max_retries})...{RESET}")
+            time.sleep(wait_time)
+        else:
+            print(f"{RED}[!] Failed to bind conduit shard ({status}) using {token_type_label}: {body}{RESET}", file=sys.stderr)
+            break
+
+    print(f"{RED}[!] Max retries reached for binding conduit shard using {token_type_label}.{RESET}", file=sys.stderr)
+    return False, None
+
+
+def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False, conduit_id: str | None = None) -> int:
+    """
+    Subscribe to EventSub topics.
+    When conduit_id is available, bot chat messages use Conduit transport + App Access Token.
+    """
+    if not is_broadcaster_token and conduit_id:
+        effective_token = app_token
+        token_type_label = "App Access Token [client_credentials]"
+        transport_method = "conduit"
+        transport_target = {"conduit_id": conduit_id}
+        token_tag = "Bot (Conduit)"
+    else:
+        effective_token = ws_token
+        token_type_label = "User Access Token"
+        transport_method = "websocket"
+        transport_target = {"session_id": session_id}
+        token_tag = "Broadcaster" if is_broadcaster_token else "Bot (WebSocket)"
 
     headers = {
         "Client-ID": client_id,
@@ -118,17 +244,13 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
             {
                 "type": "stream.online",
                 "version": "1",
-                "condition": {
-                    "broadcaster_user_id": broadcaster_id
-                },
+                "condition": {"broadcaster_user_id": broadcaster_id},
                 "optional": False
             },
             {
                 "type": "channel.channel_points_custom_reward_redemption.add",
                 "version": "1",
-                "condition": {
-                    "broadcaster_user_id": broadcaster_id
-                },
+                "condition": {"broadcaster_user_id": broadcaster_id},
                 "optional": False
             }
         ]
@@ -155,37 +277,32 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
             {
                 "type": "stream.online",
                 "version": "1",
-                "condition": {
-                    "broadcaster_user_id": broadcaster_id
-                },
+                "condition": {"broadcaster_user_id": broadcaster_id},
                 "optional": True
             },
             {
                 "type": "stream.offline",
                 "version": "1",
-                "condition": {
-                    "broadcaster_user_id": broadcaster_id
-                },
+                "condition": {"broadcaster_user_id": broadcaster_id},
                 "optional": True
             }
         ]
 
     active_subs_count = 0
-    token_tag = "Broadcaster" if is_broadcaster_token else "Bot"
 
     for sub in subscriptions:
+        transport_payload = {"method": transport_method}
+        transport_payload.update(transport_target)
+
         payload = {
             "type": sub["type"],
             "version": sub["version"],
             "condition": sub["condition"],
-            "transport": {
-                "method": "websocket",
-                "session_id": session_id
-            }
+            "transport": transport_payload
         }
 
         token_repr = abbreviate_token(effective_token)
-        print(f"{GRAY}[DEBUG] [{token_tag}] Subscribing to {sub['type']} using token: {token_repr}{RESET}", file=sys.stderr)
+        print(f"{GRAY}[DEBUG] [{token_tag}] Subscribing to {sub['type']} using {token_type_label} [Fingerprint: {token_repr}]{RESET}", file=sys.stderr)
 
         res = urllib_inspector.inspect_url(
             SUBS_URL,
@@ -203,7 +320,7 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
         print(f"{GRAY}[DEBUG] [{token_tag}] {sub_type} -> Status: {status}, Body: {body}{RESET}", file=sys.stderr)
 
         if res["success"] and status in (200, 202):
-            print(f"{GREEN}[+]{RESET} [{token_tag}] Subscribed to {BOLD}{sub_type}{RESET}!")
+            print(f"{GREEN}[+]{RESET} [{token_tag}] Subscribed to {BOLD}{sub_type}{RESET} using {token_type_label}!")
             active_subs_count += 1
         elif status in (401, 403) and is_optional:
             print(f"{YELLOW}[!] [{token_tag}] Optional subscription skipped ({sub_type}) due to missing scope/auth ({status}).{RESET}")
@@ -218,6 +335,7 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
 def send_chat_message(
     client_id: str,
     token: str,
+    token_type_label: str,
     broadcaster_id: str,
     bot_id: str,
     message: str,
@@ -259,7 +377,7 @@ def send_chat_message(
         except json.JSONDecodeError:
             return True
     else:
-        print(f"{RED}[!] Failed to send chat message ({res['status_code']}): {body}{RESET}", file=sys.stderr)
+        print(f"{RED}[!] Failed to send chat message ({res['status_code']}) using {token_type_label}: {body}{RESET}", file=sys.stderr)
         return False
 
 
@@ -271,12 +389,15 @@ async def run_eventsub_session(
     broadcaster_id: str,
     bot_id: str,
     is_broadcaster_token: bool = False,
-    is_reconnect: bool = False
-) -> str | None:
-    """Run a single EventSub WebSocket session for either Bot or Broadcaster."""
+    is_reconnect: bool = False,
+    conduit_id: str | None = None
+) -> tuple[str | None, str | None]:
+    """Run a single EventSub WebSocket session. Returns (reconnect_url, updated_conduit_id)."""
     global session
     label = "Broadcaster" if is_broadcaster_token else "Bot"
     print(f"{CYAN}[*]{RESET} [{label}] Connecting to EventSub WebSocket endpoint...")
+
+    active_conduit_id = conduit_id
 
     async with websockets.connect(
         ws_url,
@@ -296,8 +417,24 @@ async def run_eventsub_session(
                 session_id = message["payload"]["session"]["id"]
                 keepalive = message["payload"]["session"]["keepalive_timeout_seconds"]
                 print(f"{GREEN}[+] [{label}] Session established:{RESET} {BOLD}{session_id}{RESET} (Keepalive: {keepalive}s)")
+
+                if not is_broadcaster_token and active_conduit_id:
+                    bound_ok, resolved_conduit_id = await asyncio.to_thread(
+                        bind_conduit_shard,
+                        client_id,
+                        app_token,
+                        "App Access Token [client_credentials]",
+                        active_conduit_id,
+                        session_id
+                    )
+                    if not bound_ok:
+                        print(f"{RED}[!] Failed to bind WebSocket session to conduit shard after retries. Aborting bot conduit thread.{RESET}", file=sys.stderr)
+                        return None, None
+                    active_conduit_id = resolved_conduit_id
+
                 if not is_reconnect:
-                    print(f"[*] [{label}] Token fingerprint: {abbreviate_token(ws_token)}")
+                    token_type_label = "App Access Token [client_credentials]" if (not is_broadcaster_token and active_conduit_id) else "User Access Token"
+                    print(f"[*] [{label}] Token fingerprint: {abbreviate_token(ws_token)} ({token_type_label})")
 
                     subs_succeeded = await asyncio.to_thread(
                         subscribe_eventsub_topics,
@@ -307,12 +444,13 @@ async def run_eventsub_session(
                         session_id,
                         broadcaster_id,
                         bot_id,
-                        is_broadcaster_token
+                        is_broadcaster_token,
+                        active_conduit_id
                     )
 
                     if subs_succeeded == 0:
                         print(f"{RED}[!] [{label}] Zero active subscriptions registered. Closing thread cleanly.{RESET}")
-                        return None
+                        return None, active_conduit_id
 
                     if is_broadcaster_token and not greeting_sent:
                         greeting_sent = True
@@ -323,13 +461,14 @@ async def run_eventsub_session(
                                     send_chat_message,
                                     client_id,
                                     app_token,
+                                    "App Access Token [client_credentials]",
                                     broadcaster_id,
                                     bot_id,
                                     "Hello chat"
                                 ),
                                 timeout=5.0
                             )
-                            print(f"{GREEN}[+] Startup greeting sent successfully via App Token.{RESET}")
+                            print(f"{GREEN}[+] Startup greeting sent successfully via App Access Token.{RESET}")
                         except asyncio.TimeoutError:
                             print(f"{RED}[!] Startup greeting timed out (API endpoint unresponsive).{RESET}", file=sys.stderr)
                         except Exception as e:
@@ -376,6 +515,7 @@ async def run_eventsub_session(
                             send_chat_message,
                             client_id,
                             app_token,
+                            "App Access Token [client_credentials]",
                             broadcaster_id,
                             bot_id,
                             log_msg
@@ -398,6 +538,7 @@ async def run_eventsub_session(
                             send_chat_message,
                             client_id,
                             app_token,
+                            "App Access Token [client_credentials]",
                             broadcaster_id,
                             bot_id,
                             welcome_msg,
@@ -407,11 +548,12 @@ async def run_eventsub_session(
 
                     reply_text = bot_responses.evaluate_message(text, chatter)
                     if reply_text:
-                        print(f"[*] Effective write token fingerprint: {abbreviate_token(app_token)}")
+                        print(f"[*] Effective write token fingerprint: {abbreviate_token(app_token)} (App Access Token)")
                         sent = await asyncio.to_thread(
                             send_chat_message,
                             client_id,
                             app_token,
+                            "App Access Token [client_credentials]",
                             broadcaster_id,
                             bot_id,
                             reply_text,
@@ -423,20 +565,21 @@ async def run_eventsub_session(
             elif msg_type == "session_reconnect":
                 reconnect_url = message["payload"]["session"]["reconnect_url"]
                 print(f"{YELLOW}[!] [{label}] Reconnect requested to:{RESET} {reconnect_url}")
-                return reconnect_url
+                return reconnect_url, active_conduit_id
 
-    return None
+    return None, active_conduit_id
 
 
-async def supervise_listener(ws_token: str, app_token: str, client_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False):
+async def supervise_listener(ws_token: str, app_token: str, client_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False, conduit_id: str | None = None):
     """Supervise an EventSub WebSocket session across reconnects and network drops."""
     next_url = TWITCH_WS_URL
     is_reconnect = False
     label = "Broadcaster" if is_broadcaster_token else "Bot"
+    current_conduit_id = conduit_id
 
     while True:
         try:
-            reconnect_url = await run_eventsub_session(
+            reconnect_url, updated_conduit_id = await run_eventsub_session(
                 next_url,
                 ws_token,
                 app_token,
@@ -444,8 +587,12 @@ async def supervise_listener(ws_token: str, app_token: str, client_id: str, broa
                 broadcaster_id,
                 bot_id,
                 is_broadcaster_token=is_broadcaster_token,
-                is_reconnect=is_reconnect
+                is_reconnect=is_reconnect,
+                conduit_id=current_conduit_id
             )
+            if updated_conduit_id:
+                current_conduit_id = updated_conduit_id
+
             if reconnect_url:
                 next_url = reconnect_url
                 is_reconnect = True
@@ -498,6 +645,11 @@ def main():
     bot_entry = active_tokens.get("bot")
     broadcaster_entry = active_tokens.get("broadcaster")
 
+    conduit_id = get_or_create_conduit(client_id, app_token)
+    if not conduit_id:
+        print(f"{RED}[!] Critical: Failed to obtain or provision a Twitch Conduit. Chat Bots list verification will fail.{RESET}", file=sys.stderr)
+        sys.exit(1)
+
     running_sigint_handler = functools.partial(
         handle_sigint,
         client_id=client_id,
@@ -511,7 +663,7 @@ def main():
         tasks = []
         if bot_entry:
             tasks.append(
-                supervise_listener(bot_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, is_broadcaster_token=False)
+                supervise_listener(bot_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, is_broadcaster_token=False, conduit_id=conduit_id)
             )
         if broadcaster_entry:
             tasks.append(
