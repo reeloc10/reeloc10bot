@@ -29,7 +29,7 @@
       "target": "broadcaster",
       "enabled": true,
       "disabled": false,
-      "scopes": ["channel:read:redemptions"],
+      "scopes": ["channel:read:redemptions", "moderator:read:followers"],
       "refresh_token": "TOKEN_USER_2"
     }
   ]
