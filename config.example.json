@@ -21,7 +21,7 @@
       "enabled": true,
       "disabled": false,
       "refresh_token": "TOKEN_BOT_1",
-      "scopes": ["user:read:chat", "user:bot"]
+      "scopes": ["user:read:chat", "user:write:chat", "user:bot"]
     },
     {
       "flow": "user",
