@@ -302,7 +302,7 @@ def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
         full_url = f"{base_url}?{urllib.parse.urlencode(params)}"
 
         # Use your inspector's core function
-        res = inspect_url(
+        res = urllib_inspector.inspect_url(
             full_url,
             custom_headers=headers,
             method="GET"
@@ -628,7 +628,7 @@ async def run_eventsub_session(
                         total_redemptions = await asyncio.to_thread(
                             fetch_daily_check_count,
                             client_id,
-                            user_token,  # TOKEN_USER_2 with channel:read:redemptions
+                            ws_token,  # Using the active listener's token
                             broadcaster_id,
                             reward_id
                         )
