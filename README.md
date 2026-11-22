@@ -8,6 +8,14 @@ A lightweight, minimal dependency Twitch bot module built in standard library Py
 * **Modular Integration:** Relies on `urllib_inspector` for robust POST/GET payload encoding, redirect handling, and ANSI-colored output tracing.
 * **Strict Minimalism:** Designed to run cleanly inside minimal Linux desktop environments without third-party packaging overhead.
 
+## Tokens file
+
+Possible command to edit secret files:
+
+```bash
+nvim -n -u NONE -i NONE --noplugin [<secrets>/]config.json
+```
+
 ## Acquiring tokens
 
 config.reduced.json : ["twitch_client_id"] only required.
