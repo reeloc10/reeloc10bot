@@ -20,10 +20,10 @@ REVOKE_URL = "https://id.twitch.tv/oauth2/revoke"
 
 def main():
     config = load_config()
-    client_id = config.client_id
-    user_token = config.bot_token
+    client_id = config.get("twitch_client_id", "")
+    user_token = config.get("twitch_user_token", "")
 
-    if not client_id or not user_token:
+    if not client_id or not user_token or len(client_id) == 0 or len(user_token) == 0:
         print(f"{RED}[!] Missing 'twitch_client_id' or 'twitch_user_token' in configuration file.{RESET}", file=sys.stderr)
         sys.exit(1)
 
