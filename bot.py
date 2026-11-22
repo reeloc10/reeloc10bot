@@ -414,6 +414,15 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
                 "optional": False
             },
             {
+                "type": "channel.follow",
+                "version": "2",
+                "condition": {
+                    "broadcaster_user_id": broadcaster_id,
+                    "moderator_user_id": broadcaster_id
+                },
+                "optional": True
+            },
+            {
                 "type": "channel.channel_points_custom_reward_redemption.add",
                 "version": "1",
                 "condition": {"broadcaster_user_id": broadcaster_id},
@@ -430,15 +439,6 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
                     "user_id": bot_id
                 },
                 "optional": False
-            },
-            {
-                "type": "channel.follow",
-                "version": "2",
-                "condition": {
-                    "broadcaster_user_id": broadcaster_id,
-                    "moderator_user_id": bot_id
-                },
-                "optional": True
             },
             {
                 "type": "stream.online",
@@ -670,6 +670,16 @@ async def run_eventsub_session(
                     session.followers_this_stream += 1
                     username = event_data.get("user_name")
                     print(f"{GREEN}[+] New follower this stream:{RESET} {BOLD}{username}{RESET}")
+                    log_msg = f"{username} just followed, greetings"
+                    await asyncio.to_thread(
+                        send_chat_message,
+                        client_id,
+                        app_token,
+                        "App Access Token [client_credentials]",
+                        broadcaster_id,
+                        bot_id,
+                        log_msg
+                    )
 
                 elif sub_type == "channel.channel_points_custom_reward_redemption.add":
                     reward_title = event_data.get("reward", {}).get("title", "")
