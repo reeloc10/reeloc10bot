@@ -55,6 +55,31 @@ class StreamSession:
 session = StreamSession()
 
 
+class TwitchChatClient:
+    def __init__(self, client_id: str, app_token: str, broadcaster_id: str, bot_id: str):
+        self.client_id = client_id
+        self.app_token = app_token
+        self.broadcaster_id = broadcaster_id
+        self.bot_id = bot_id
+
+    def update_token(self, new_token: str):
+        """Update the active app token upon refresh."""
+        self.app_token = new_token
+
+    async def send(self, message: str, reply_parent_message_id: str | None = None) -> bool:
+        """Asynchronously dispatch a chat message using stored runtime context."""
+        return await asyncio.to_thread(
+            send_chat_message,
+            self.client_id,
+            self.app_token,
+            "App Access Token [client_credentials]",
+            self.broadcaster_id,
+            self.bot_id,
+            message,
+            reply_parent_message_id
+        )
+
+
 def abbreviate_token(token: str) -> str:
     """Safely abbreviate a token for debug output."""
     if not token:
@@ -133,13 +158,13 @@ def purge_matching_subscriptions(client_id: str, app_token: str, broadcaster_id:
         print(f"{RED}[!] Error purging subscription type {sub_type}: {e}{RESET}", file=sys.stderr)
 
 
-def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
+def handle_sigint(sig, frame, chat_client: TwitchChatClient):
     """Intercept Ctrl+C, clean up EventSub subscriptions, send shutdown message to chat, and exit cleanly."""
     print(f"\n{YELLOW}[*]{RESET} Shutting down reeloc10bot gracefully...")
 
     headers = {
-        "Client-ID": client_id,
-        "Authorization": f"Bearer {app_token}"
+        "Client-ID": chat_client.client_id,
+        "Authorization": f"Bearer {chat_client.app_token}"
     }
 
     # Clean up active EventSub subscriptions on graceful exit
@@ -164,11 +189,11 @@ def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
 
     try:
         send_chat_message(
-            client_id=client_id,
-            token=app_token,
+            client_id=chat_client.client_id,
+            token=chat_client.app_token,
             token_type_label="App Access Token [client_credentials]",
-            broadcaster_id=broadcaster_id,
-            bot_id=bot_id,
+            broadcaster_id=chat_client.broadcaster_id,
+            bot_id=chat_client.bot_id,
             message="Shutting down. Farewell!"
         )
         print(f"{GREEN}[->]{RESET} Shutdown notice sent to chat.")
@@ -304,6 +329,7 @@ def bind_conduit_shard(client_id: str, token: str, token_type_label: str, condui
     print(f"{RED}[!] Max retries reached for binding conduit shard using {token_type_label}.{RESET}", file=sys.stderr)
     return False, None
 
+
 def fetch_user_redemption_count(
     client_id: str,
     access_token: str,
@@ -379,6 +405,7 @@ def fetch_user_redemption_count(
         return max_limit, "Capped value reached"
 
     return len(all_redemptions), None
+
 
 def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False, conduit_id: str | None = None) -> int:
     """
@@ -558,6 +585,7 @@ async def run_eventsub_session(
     client_id: str,
     broadcaster_id: str,
     bot_id: str,
+    chat_client: TwitchChatClient,
     is_broadcaster_token: bool = False,
     is_reconnect: bool = False,
     conduit_id: str | None = None
@@ -627,15 +655,7 @@ async def run_eventsub_session(
                         print(f"{GREEN}[->]{RESET} Sending startup greeting to chat...")
                         try:
                             await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    send_chat_message,
-                                    client_id,
-                                    app_token,
-                                    "App Access Token [client_credentials]",
-                                    broadcaster_id,
-                                    bot_id,
-                                    "Hello chat"
-                                ),
+                                chat_client.send("Hello chat"),
                                 timeout=5.0
                             )
                             print(f"{GREEN}[+] Startup greeting sent successfully via App Access Token.{RESET}")
@@ -671,15 +691,7 @@ async def run_eventsub_session(
                     username = event_data.get("user_name")
                     print(f"{GREEN}[+] New follower this stream:{RESET} {BOLD}{username}{RESET}")
                     log_msg = f"{username} just followed, greetings"
-                    await asyncio.to_thread(
-                        send_chat_message,
-                        client_id,
-                        app_token,
-                        "App Access Token [client_credentials]",
-                        broadcaster_id,
-                        bot_id,
-                        log_msg
-                    )
+                    await chat_client.send(log_msg)
 
                 elif sub_type == "channel.channel_points_custom_reward_redemption.add":
                     reward_title = event_data.get("reward", {}).get("title", "")
@@ -706,15 +718,7 @@ async def run_eventsub_session(
 
                         print(f"{GREEN}[+]{RESET} {log_msg}")
 
-                        await asyncio.to_thread(
-                            send_chat_message,
-                            client_id,
-                            app_token,
-                            "App Access Token [client_credentials]",
-                            broadcaster_id,
-                            bot_id,
-                            log_msg
-                        )
+                        await chat_client.send(log_msg)
 
                 elif sub_type == "channel.chat.message":
                     chatter_id = event_data.get("chatter_user_id")
@@ -729,31 +733,13 @@ async def run_eventsub_session(
                     if chatter not in session.session_visitors:
                         session.session_visitors.add(chatter)
                         welcome_msg = f"Hi @{chatter}!"
-                        await asyncio.to_thread(
-                            send_chat_message,
-                            client_id,
-                            app_token,
-                            "App Access Token [client_credentials]",
-                            broadcaster_id,
-                            bot_id,
-                            welcome_msg,
-                            message_id
-                        )
+                        await chat_client.send(welcome_msg, message_id)
                         print(f"{GREEN}[->]{RESET} Welcomed new session chatter {BOLD}{chatter}{RESET}")
 
                     reply_text = bot_responses.evaluate_message(text, chatter)
                     if reply_text:
                         print(f"[*] Effective write token fingerprint: {abbreviate_token(app_token)} (App Access Token)")
-                        sent = await asyncio.to_thread(
-                            send_chat_message,
-                            client_id,
-                            app_token,
-                            "App Access Token [client_credentials]",
-                            broadcaster_id,
-                            bot_id,
-                            reply_text,
-                            message_id
-                        )
+                        sent = await chat_client.send(reply_text, message_id)
                         if sent:
                             print(f"{GREEN}[->]{RESET} Replied to {BOLD}{chatter}{RESET}: {reply_text}")
 
@@ -765,7 +751,7 @@ async def run_eventsub_session(
     return None, active_conduit_id
 
 
-async def supervise_listener(ws_token: str, app_token: str, client_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False, conduit_id: str | None = None):
+async def supervise_listener(ws_token: str, app_token: str, client_id: str, broadcaster_id: str, bot_id: str, chat_client: TwitchChatClient, is_broadcaster_token: bool = False, conduit_id: str | None = None):
     """Supervise an EventSub WebSocket session across reconnects and network drops."""
     next_url = TWITCH_WS_URL
     is_reconnect = False
@@ -781,6 +767,7 @@ async def supervise_listener(ws_token: str, app_token: str, client_id: str, broa
                 client_id,
                 broadcaster_id,
                 bot_id,
+                chat_client,
                 is_broadcaster_token=is_broadcaster_token,
                 is_reconnect=is_reconnect,
                 conduit_id=current_conduit_id
@@ -840,6 +827,9 @@ def main():
     bot_entry = active_tokens.get("bot")
     broadcaster_entry = active_tokens.get("broadcaster")
 
+    # Initialize the stateful chat client helper
+    chat_client = TwitchChatClient(client_id, app_token, broadcaster_id, bot_id)
+
     # Prune any stale EventSub subscriptions left over from brutal kills
     prune_existing_subscriptions(client_id, app_token)
 
@@ -850,10 +840,7 @@ def main():
 
     running_sigint_handler = functools.partial(
         handle_sigint,
-        client_id=client_id,
-        app_token=app_token,
-        broadcaster_id=broadcaster_id,
-        bot_id=bot_id
+        chat_client=chat_client
     )
     signal.signal(signal.SIGINT, running_sigint_handler)
 
@@ -861,11 +848,11 @@ def main():
         tasks = []
         if bot_entry:
             tasks.append(
-                supervise_listener(bot_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, is_broadcaster_token=False, conduit_id=conduit_id)
+                supervise_listener(bot_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, chat_client, is_broadcaster_token=False, conduit_id=conduit_id)
             )
         if broadcaster_entry:
             tasks.append(
-                supervise_listener(broadcaster_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, is_broadcaster_token=True)
+                supervise_listener(broadcaster_entry["access_token"], app_token, client_id, broadcaster_id, bot_id, chat_client, is_broadcaster_token=True)
             )
         if not tasks:
             print(f"{RED}[!] Error: No active token entries configured for listeners!{RESET}", file=sys.stderr)
