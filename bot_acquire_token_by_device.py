@@ -29,9 +29,8 @@ def load_client_id() -> str:
             raw = json.load(f)
             return raw.get("twitch_client_id", "YOUR_CLIENT_ID")
     except json.JSONDecodeError:
-        print(f"[!] Failed to parse JSON config {config_path}")
-        return "YOUR_CLIENT_ID"
-
+        print(f"[!] Failed to parse JSON config {config_path}", file=sys.stderr)
+        sys.exit(1)
 
 def main():
     client_id = load_client_id()
