@@ -271,10 +271,16 @@ def bind_conduit_shard(client_id: str, token: str, token_type_label: str, condui
     print(f"{RED}[!] Max retries reached for binding conduit shard using {token_type_label}.{RESET}", file=sys.stderr)
     return False, None
 
-def fetch_user_redemption_count(client_id, access_token, broadcaster_id, reward_id, target_user_id):
+def fetch_user_redemption_count(
+    client_id: str,
+    access_token: str,
+    broadcaster_id: str,
+    reward_id: str,
+    target_user_id: str
+) -> tuple[int | None, str | None]:
     """
-    Queries Twitch Helix for fulfilled redemptions by a specific user using urllib_inspector.
-    Returns the total count of redemptions for the reward, capped at 500 max.
+    Queries Twitch Helix for fulfilled redemptions by a specific user.
+    Returns (count, None) on success, or (None, error_reason) on failure, capped at 500 max.
     References:
         https://dev.twitch.tv/docs/api/reference/channel-points#get-custom-reward-redemption
         https://dev.twitch.tv/docs/api/guide#pagination
@@ -294,7 +300,7 @@ def fetch_user_redemption_count(client_id, access_token, broadcaster_id, reward_
             "broadcaster_id": broadcaster_id,
             "reward_id": reward_id,
             "status": "FULFILLED",
-            "user_id": target_user_id,  # Filter specifically for this user ID
+            "user_id": target_user_id,
             "first": 50
         }
         if cursor:
@@ -308,12 +314,22 @@ def fetch_user_redemption_count(client_id, access_token, broadcaster_id, reward_
             method="GET"
         )
 
-        if not res["success"] or res["status_code"] != 200:
-            print(f"[!] Failed to fetch redemptions for user {target_user_id}: Status {res['status_code']} - {res.get('body')}")
-            break
+        status = res.get("status_code")
+        body = res.get("body")
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+
+        if not res["success"] or status != 200:
+            err_msg = f"HTTP {status}: {body}"
+            try:
+                err_msg = f"HTTP {status}: {json.loads(body).get('message', body)}"
+            except (json.JSONDecodeError, TypeError):
+                pass
+            print(f"{RED}[!] Failed to fetch redemptions for user {target_user_id}: {err_msg}{RESET}", file=sys.stderr)
+            return None, err_msg
 
         try:
-            payload = json.loads(res["body"])
+            payload = json.loads(body)
             batch = payload.get("data", [])
             all_redemptions.extend(batch)
 
@@ -321,14 +337,15 @@ def fetch_user_redemption_count(client_id, access_token, broadcaster_id, reward_
             if not cursor or not batch:
                 break
         except (json.JSONDecodeError, TypeError) as e:
-            print(f"[!] Error parsing redemption payload: {e}")
-            break
+            err_msg = f"JSON parse error: {e}"
+            print(f"{RED}[!] {err_msg}{RESET}", file=sys.stderr)
+            return None, err_msg
 
     if len(all_redemptions) >= max_limit:
         print(f"[!] Warning: Redemption count overflowed safety threshold ({max_limit}). Returning capped value.")
-        return max_limit
+        return max_limit, "Capped value reached"
 
-    return len(all_redemptions)
+    return len(all_redemptions), None
 
 def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False, conduit_id: str | None = None) -> int:
     """
@@ -621,20 +638,24 @@ async def run_eventsub_session(
                     if reward_title == "Daily check":
                         reward_id = event_data.get("reward", {}).get("id")
                         username = event_data.get("user_name")
-                        chatter_user_id = event_data.get("user_id")  # <--- Get the user ID here
+                        chatter_user_id = event_data.get("user_id")
                         session.session_visitors.add(username)
 
-                        # Query Twitch's database state authoritatively for this specific user
-                        user_redemptions = await asyncio.to_thread(
+                        user_redemptions, fetch_err = await asyncio.to_thread(
                             fetch_user_redemption_count,
                             client_id,
-                            ws_token,  # Broadcaster token with channel:read:redemptions
+                            ws_token,
                             broadcaster_id,
                             reward_id,
                             chatter_user_id
                         )
 
-                        log_msg = f"Daily check redeem: {username} (User Total: {user_redemptions})"
+                        if user_redemptions is not None:
+                            log_msg = f"Daily check redeem: {username} (User Total: {user_redemptions})"
+                        else:
+                            log_msg = f"Daily check redeem: {username}"
+                            print(f"{YELLOW}[*] Redemption count unavailable ({fetch_err}); omitting total from chat.{RESET}", file=sys.stderr)
+
                         print(f"{GREEN}[+]{RESET} {log_msg}")
 
                         await asyncio.to_thread(
