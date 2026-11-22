@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 import urllib.error
+import urllib.parse
 
 import urllib_inspector
 import token_pipeline
@@ -270,6 +271,65 @@ def bind_conduit_shard(client_id: str, token: str, token_type_label: str, condui
     print(f"{RED}[!] Max retries reached for binding conduit shard using {token_type_label}.{RESET}", file=sys.stderr)
     return False, None
 
+def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
+    """
+    Queries Twitch Helix for fulfilled redemptions using urllib_inspector.
+    Returns the total count of redemptions for the reward, capped at 500 max.
+    References:
+        https://dev.twitch.tv/docs/api/reference/channel-points#get-custom-reward-redemption
+        https://dev.twitch.tv/docs/api/guide#pagination
+    """
+    base_url = "https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions"
+    all_redemptions = []
+    cursor = None
+    max_limit = 500
+
+    headers = {
+        "Client-Id": client_id,
+        "Authorization": f"Bearer {access_token}"
+    }
+
+    while len(all_redemptions) < max_limit:
+        params = {
+            "broadcaster_id": broadcaster_id,
+            "reward_id": reward_id,
+            "status": "FULFILLED",
+            "first": 50
+        }
+        if cursor:
+            params["after"] = cursor
+
+        full_url = f"{base_url}?{urllib.parse.urlencode(params)}"
+
+        # Use your inspector's core function
+        res = inspect_url(
+            full_url,
+            custom_headers=headers,
+            method="GET"
+        )
+
+        if not res["success"] or res["status_code"] != 200:
+            print(f"[!] Failed to fetch redemptions: Status {res['status_code']} - {res['reason']}")
+            break
+
+        try:
+            payload = json.loads(res["body"])
+            batch = payload.get("data", [])
+            all_redemptions.extend(batch)
+
+            # Check pagination cursor for next page
+            cursor = payload.get("pagination", {}).get("cursor")
+            if not cursor or not batch:
+                break
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"[!] Error parsing redemption payload: {e}")
+            break
+
+    if len(all_redemptions) >= max_limit:
+        print(f"[!] Warning: Redemption count overflowed safety threshold ({max_limit}). Returning capped value.")
+        return max_limit
+
+    return len(all_redemptions)
 
 def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, session_id: str, broadcaster_id: str, bot_id: str, is_broadcaster_token: bool = False, conduit_id: str | None = None) -> int:
     """
@@ -560,11 +620,23 @@ async def run_eventsub_session(
                 elif sub_type == "channel.channel_points_custom_reward_redemption.add":
                     reward_title = event_data.get("reward", {}).get("title", "")
                     if reward_title == "Daily check":
-                        session.daily_redeems_count += 1
+                        reward_id = event_data.get("reward", {}).get("id")
                         username = event_data.get("user_name")
                         session.session_visitors.add(username)
 
-                        log_msg = f"Daily check redeem: {username} (Total today: {session.daily_redeems_count})"
+                        # Query Twitch's database state authoritatively
+                        total_redemptions = await asyncio.to_thread(
+                            fetch_daily_check_count,
+                            client_id,
+                            user_token,  # TOKEN_USER_2 with channel:read:redemptions
+                            broadcaster_id,
+                            reward_id
+                        )
+
+                        if total_redemptions is not None:
+                            session.daily_redeems_count = total_redemptions
+
+                        log_msg = f"Daily check redeem: {username} (Twitch DB Total: {session.daily_redeems_count})"
                         print(f"{GREEN}[+]{RESET} {log_msg}")
 
                         await asyncio.to_thread(
