@@ -271,9 +271,9 @@ def bind_conduit_shard(client_id: str, token: str, token_type_label: str, condui
     print(f"{RED}[!] Max retries reached for binding conduit shard using {token_type_label}.{RESET}", file=sys.stderr)
     return False, None
 
-def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
+def fetch_user_redemption_count(client_id, access_token, broadcaster_id, reward_id, target_user_id):
     """
-    Queries Twitch Helix for fulfilled redemptions using urllib_inspector.
+    Queries Twitch Helix for fulfilled redemptions by a specific user using urllib_inspector.
     Returns the total count of redemptions for the reward, capped at 500 max.
     References:
         https://dev.twitch.tv/docs/api/reference/channel-points#get-custom-reward-redemption
@@ -294,6 +294,7 @@ def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
             "broadcaster_id": broadcaster_id,
             "reward_id": reward_id,
             "status": "FULFILLED",
+            "user_id": target_user_id,  # Filter specifically for this user ID
             "first": 50
         }
         if cursor:
@@ -301,7 +302,6 @@ def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
 
         full_url = f"{base_url}?{urllib.parse.urlencode(params)}"
 
-        # Use your inspector's core function
         res = urllib_inspector.inspect_url(
             full_url,
             custom_headers=headers,
@@ -309,7 +309,7 @@ def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
         )
 
         if not res["success"] or res["status_code"] != 200:
-            print(f"[!] Failed to fetch redemptions: Status {res['status_code']} - {res['reason']}")
+            print(f"[!] Failed to fetch redemptions for user {target_user_id}: Status {res['status_code']} - {res.get('body')}")
             break
 
         try:
@@ -317,7 +317,6 @@ def fetch_daily_check_count(client_id, access_token, broadcaster_id, reward_id):
             batch = payload.get("data", [])
             all_redemptions.extend(batch)
 
-            # Check pagination cursor for next page
             cursor = payload.get("pagination", {}).get("cursor")
             if not cursor or not batch:
                 break
@@ -622,21 +621,20 @@ async def run_eventsub_session(
                     if reward_title == "Daily check":
                         reward_id = event_data.get("reward", {}).get("id")
                         username = event_data.get("user_name")
+                        chatter_user_id = event_data.get("user_id")  # <--- Get the user ID here
                         session.session_visitors.add(username)
 
-                        # Query Twitch's database state authoritatively
-                        total_redemptions = await asyncio.to_thread(
-                            fetch_daily_check_count,
+                        # Query Twitch's database state authoritatively for this specific user
+                        user_redemptions = await asyncio.to_thread(
+                            fetch_user_redemption_count,
                             client_id,
-                            ws_token,  # Using the active listener's token
+                            ws_token,  # Broadcaster token with channel:read:redemptions
                             broadcaster_id,
-                            reward_id
+                            reward_id,
+                            chatter_user_id
                         )
 
-                        if total_redemptions is not None:
-                            session.daily_redeems_count = total_redemptions
-
-                        log_msg = f"Daily check redeem: {username} (Twitch DB Total: {session.daily_redeems_count})"
+                        log_msg = f"Daily check redeem: {username} (User Total: {user_redemptions})"
                         print(f"{GREEN}[+]{RESET} {log_msg}")
 
                         await asyncio.to_thread(
