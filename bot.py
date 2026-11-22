@@ -100,6 +100,39 @@ def prune_existing_subscriptions(client_id: str, app_token: str):
         print(f"{RED}[!] Failed to prune existing subscriptions: {e}{RESET}", file=sys.stderr)
 
 
+def purge_matching_subscriptions(client_id: str, app_token: str, broadcaster_id: str, sub_type: str, bot_id: str | None = None):
+    """Delete any existing EventSub subscriptions matching a specific type and condition before recreating."""
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {app_token}"
+    }
+    res = urllib_inspector.inspect_url(SUBS_URL, custom_headers=headers)
+    if not res["success"] or res.get("status_code") != 200:
+        print(f"{YELLOW}[*] {SUBS_URL} query failed", file=sys.stderr)
+        return
+
+    body = res.get("body")
+    if isinstance(body, bytes):
+        body = body.decode("utf-8")
+
+    try:
+        data = json.loads(body).get("data", [])
+        for sub in data:
+            if sub.get("type") == sub_type:
+                cond = sub.get("condition", {})
+                if cond.get("broadcaster_user_id") == broadcaster_id:
+                    if bot_id is None or cond.get("user_id") == bot_id or cond.get("moderator_user_id") == bot_id:
+                        sub_id = sub["id"]
+                        print(f"{YELLOW}[*] Purging stale subscription {sub_type} ({sub_id}) prior to fresh recreation...{RESET}", file=sys.stderr)
+                        urllib_inspector.inspect_url(
+                            f"{SUBS_URL}?id={sub_id}",
+                            custom_headers=headers,
+                            method="DELETE"
+                        )
+    except Exception as e:
+        print(f"{RED}[!] Error purging subscription type {sub_type}: {e}{RESET}", file=sys.stderr)
+
+
 def handle_sigint(sig, frame, client_id, app_token, broadcaster_id, bot_id):
     """Intercept Ctrl+C, clean up EventSub subscriptions, send shutdown message to chat, and exit cleanly."""
     print(f"\n{YELLOW}[*]{RESET} Shutting down reeloc10bot gracefully...")
@@ -351,6 +384,7 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
     """
     Subscribe to EventSub topics.
     When conduit_id is available, bot chat messages use Conduit transport + App Access Token.
+    Purges any stale matching subscriptions prior to creation to guarantee clean registration.
     """
     if not is_broadcaster_token and conduit_id:
         effective_token = app_token
@@ -423,18 +457,24 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
     active_subs_count = 0
 
     for sub in subscriptions:
+        sub_type = sub["type"]
+        is_optional = sub.get("optional", False)
+
+        # Purge any stale/conflicting subscription before attempting to create a fresh one
+        purge_matching_subscriptions(client_id, app_token, broadcaster_id, sub_type, bot_id=bot_id if sub_type == "channel.chat.message" else None)
+
         transport_payload = {"method": transport_method}
         transport_payload.update(transport_target)
 
         payload = {
-            "type": sub["type"],
+            "type": sub_type,
             "version": sub["version"],
             "condition": sub["condition"],
             "transport": transport_payload
         }
 
         token_repr = abbreviate_token(effective_token)
-        print(f"{GRAY}[DEBUG] [{token_tag}] Subscribing to {sub['type']} using {token_type_label} [Fingerprint: {token_repr}]{RESET}", file=sys.stderr)
+        print(f"{GRAY}[DEBUG] [{token_tag}] Subscribing to {sub_type} using {token_type_label} [Fingerprint: {token_repr}]{RESET}", file=sys.stderr)
 
         res = urllib_inspector.inspect_url(
             SUBS_URL,
@@ -442,8 +482,6 @@ def subscribe_eventsub_topics(client_id: str, ws_token: str, app_token: str, ses
             raw_json=json.dumps(payload)
         )
 
-        sub_type = sub["type"]
-        is_optional = sub.get("optional", False)
         status = res.get("status_code")
         body = res.get("body")
         if isinstance(body, bytes):
